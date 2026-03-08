@@ -7,3 +7,7 @@ python-dotenv
 pytz
 nsetools
 nsepython
+pyotp
+smartapi-python
+logzero
+websocket-client

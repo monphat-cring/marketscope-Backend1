@@ -10,6 +10,7 @@ import pandas as pd
 import pytz
 import yfinance as yf
 
+from angel_client import get_bulk_ltp
 from stocks import ALL_SYMBOLS, SECTORS, FO_STOCKS, SCANNER_STOCKS
 from rfactor import calculate_rfactor_for_all
 from nse_fetcher import fetch_all_nse_data, fetch_all_nse_full_quotes
@@ -36,6 +37,12 @@ def _safe_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _compute_change_pct(ltp: float, prev_close: float, fallback_change_pct: float = 0.0) -> float:
+    if prev_close > 0:
+        return round(((ltp - prev_close) / prev_close) * 100, 2)
+    return round(fallback_change_pct, 2)
 
 
 def _fetch_prev_close(symbol: str) -> float:
@@ -252,6 +259,14 @@ def fetch_all_sectors() -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"NSE full quote fetch failed: {e}")
 
+    logger.info(f"Fetching Angel SmartAPI LTP for {len(clean_symbols)} symbols...")
+    angel_ltp: Dict[str, float] = {}
+    try:
+        angel_ltp = get_bulk_ltp(clean_symbols)
+        logger.info(f"Angel LTP received for {len(angel_ltp)}/{len(clean_symbols)} symbols.")
+    except Exception as e:
+        logger.warning(f"Angel LTP fetch failed: {e}")
+
     # STEP 2 — Daily yfinance: 20-day volume average baseline (fast; 1d interval, 5d period)
     logger.info(f"Downloading daily data for volume baseline ({len(ALL_SYMBOLS)} symbols)...")
     daily_data = yf.download(
@@ -284,6 +299,7 @@ def fetch_all_sectors() -> Dict[str, Any]:
         try:
             clean = symbol.replace(".NS", "")
             q = nse_full.get(clean)
+            angel_price = angel_ltp.get(clean)
 
             # Fall back to yfinance daily if NSE quote unavailable
             if not q or q.get("ltp", 0) <= 0:
@@ -293,15 +309,25 @@ def fetch_all_sectors() -> Dict[str, Any]:
                 close_s = d_df["Close"].dropna()
                 if len(close_s) < 2:
                     continue
-                ltp_fb        = round(float(close_s.iloc[-1]), 2)
                 prev_close_fb = float(close_s.iloc[-2])
-                change_fb     = round((ltp_fb - prev_close_fb) / prev_close_fb * 100, 2)
+                ltp_fb        = round(float(angel_price or close_s.iloc[-1]), 2)
+                change_fb     = _compute_change_pct(ltp_fb, prev_close_fb)
                 sym_data[clean] = {
                     "symbol": clean, "ltp": ltp_fb, "change_pct": change_fb,
                     "volume_ratio": 1.0, "fo": clean in FO_STOCKS,
                     "day_high": ltp_fb, "day_low": ltp_fb, "day_open": ltp_fb, "vwap": 0.0,
                 }
                 continue
+
+            live_ltp = round(float(angel_price or q.get("ltp", 0) or 0), 2)
+            prev_close = float(q.get("prev_close", 0) or 0)
+            if prev_close <= 0:
+                d_df = get_sym_df(daily_data, symbol)
+                if d_df is not None:
+                    close_s = d_df["Close"].dropna()
+                    if len(close_s) >= 2:
+                        prev_close = float(close_s.iloc[-2])
+            change_pct = _compute_change_pct(live_ltp, prev_close, float(q.get("change_pct", 0) or 0))
 
             # Volume ratio: NSE total traded (lakhs → shares) vs 20-day yfinance avg
             vol_ratio = 1.0
@@ -317,14 +343,14 @@ def fetch_all_sectors() -> Dict[str, Any]:
 
             sym_data[clean] = {
                 "symbol":       clean,
-                "ltp":          q["ltp"],
-                "change_pct":   q["change_pct"],
+                "ltp":          live_ltp,
+                "change_pct":   change_pct,
                 "volume_ratio": vol_ratio,
                 "fo":           clean in FO_STOCKS,
                 # NSE live intraday fields — used by rfactor price_action and boost
-                "day_high":     q.get("day_high",  q["ltp"]),
-                "day_low":      q.get("day_low",   q["ltp"]),
-                "day_open":     q.get("day_open",  q["ltp"]),
+                "day_high":     q.get("day_high",  live_ltp or q["ltp"]),
+                "day_low":      q.get("day_low",   live_ltp or q["ltp"]),
+                "day_open":     q.get("day_open",  live_ltp or q["ltp"]),
                 "vwap":         q.get("vwap",       0.0),
                 # Delivery & bid-ask written here directly so they survive even if rfactor skips
                 "delivery_pct":  round(float(q.get("delivery_pct",  0) or 0), 1) or None,
