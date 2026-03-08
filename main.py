@@ -44,6 +44,16 @@ logger = logging.getLogger(__name__)
 cache: InMemoryCache = InMemoryCache()
 
 CACHE_DURATION_SECONDS: int = int(os.getenv("CACHE_DURATION_SECONDS", 300))
+INITIAL_CACHE_RETRY_ATTEMPTS: int = int(os.getenv("INITIAL_CACHE_RETRY_ATTEMPTS", 3))
+INITIAL_CACHE_RETRY_DELAY_SECONDS: float = float(os.getenv("INITIAL_CACHE_RETRY_DELAY_SECONDS", 5))
+
+
+def _warming_up_response(message: str = "Data cache is warming up", **payload: Any) -> Dict[str, Any]:
+    """Return a structured warm-up response without changing route paths."""
+    response = dict(payload)
+    response.setdefault("status", "warming_up")
+    response.setdefault("message", message)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -87,17 +97,23 @@ def _momentum_snapshot_job() -> None:
 # ---------------------------------------------------------------------------
 
 async def _bg_init_fetch() -> None:
-    """Run the initial market data fetch, then kick off the F&O radar OI refresh."""
-    try:
-        logger.info("[BG] Starting initial market data fetch...")
-        loop = asyncio.get_running_loop()
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mscope-init") as ex:
-            initial_data = await loop.run_in_executor(ex, fetch_all_sectors)
-        cache.set(initial_data)
-        logger.info("[BG] Initial fetch completed successfully.")
-    except Exception as exc:
-        logger.error(f"[BG] Initial fetch failed: {exc}", exc_info=True)
-        return  # Don't attempt radar refresh if fetch failed
+    """Run the initial market data fetch before the app reports ready."""
+    last_exc: Exception | None = None
+    for attempt in range(1, INITIAL_CACHE_RETRY_ATTEMPTS + 1):
+        try:
+            logger.info("[INIT] Starting initial market data fetch (attempt %d/%d)...", attempt, INITIAL_CACHE_RETRY_ATTEMPTS)
+            loop = asyncio.get_running_loop()
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mscope-init") as ex:
+                initial_data = await loop.run_in_executor(ex, fetch_all_sectors)
+            cache.set(initial_data)
+            logger.info("[INIT] Initial fetch completed successfully.")
+            break
+        except Exception as exc:
+            last_exc = exc
+            logger.error("[INIT] Initial fetch failed on attempt %d/%d: %s", attempt, INITIAL_CACHE_RETRY_ATTEMPTS, exc, exc_info=True)
+            if attempt >= INITIAL_CACHE_RETRY_ATTEMPTS:
+                raise RuntimeError("Initial cache warm-up failed") from exc
+            await asyncio.sleep(INITIAL_CACHE_RETRY_DELAY_SECONDS)
 
     # Immediately seed the F&O Radar OI cache in its own background thread.
     # This runs after the initial fetch so stock price data is already available.
@@ -133,7 +149,7 @@ async def _bg_backfill() -> None:
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start the server immediately; heavy fetches run in the background."""
+    """Warm the critical cache before reporting the server as ready."""
     logger.info("MarketScope starting...")
 
     # Give sector_momentum a reference to the cache for EOD fallback snapshots
@@ -156,22 +172,18 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Sector momentum snapshot job registered (cron-aligned).")
 
-    # Fire the initial fetch in the background — server becomes available immediately.
-    # The /heatmap endpoint returns {"error": "Data not available yet"} until this completes.
-    _init_task = asyncio.create_task(_bg_init_fetch())
+    # Block startup until the first cache warm-up completes.
+    await _bg_init_fetch()
 
     # Catch-up backfill also runs in the background if started after market open.
     if _is_after_open_today():
         logger.info("Server started after market open — scheduling background backfill...")
         asyncio.create_task(_bg_backfill())
 
-    logger.info("MarketScope startup complete — server is ready. (Initial fetch running in background)")
+    logger.info("MarketScope startup complete — server is ready.")
 
     yield  # Application is now running and accepting requests
 
-    # Graceful shutdown — cancel any still-running init task
-    if not _init_task.done():
-        _init_task.cancel()
     logger.info("MarketScope shutting down...")
     scheduler.shutdown(wait=False)
     logger.info("Scheduler stopped.")
@@ -255,7 +267,7 @@ async def get_rfactor(
     """
     cached = cache.get()
     if not cached:
-        raise HTTPException(status_code=503, detail="Data not ready")
+        return _warming_up_response(stocks=[], last_updated="", total=0)
 
     # Use the scanner_stocks universe (not heatmap sectors)
     all_stocks = list(cached.get("scanner_stocks", []))
@@ -299,7 +311,7 @@ async def get_scanner(
     """
     cached = cache.get()
     if not cached:
-        raise HTTPException(status_code=503, detail="Data not ready")
+        return _warming_up_response(stocks=[], total=0, last_updated="")
 
     # Use the scanner_stocks universe (not heatmap sectors)
     all_stocks = list(cached.get("scanner_stocks", []))
@@ -365,7 +377,7 @@ async def get_intraday_boost(
     """
     cached = cache.get()
     if not cached:
-        raise HTTPException(status_code=503, detail="Data not ready")
+        return _warming_up_response(stocks=[], total=0, last_updated="")
 
     # Use the scanner_stocks universe (not heatmap sectors)
     all_stocks = list(cached.get("scanner_stocks", []))
@@ -399,7 +411,9 @@ async def get_sector_scope(
     """
     cached = cache.get()
     if not cached:
-        raise HTTPException(status_code=503, detail="Data not ready")
+        if sector:
+            return _warming_up_response(sector=sector.strip().upper(), stocks=[], total=0, last_updated="")
+        return _warming_up_response(sectors=[], last_updated="")
 
     # Compute scope scores on a shallow copy of the cached sector list
     import copy
@@ -643,7 +657,20 @@ def breadth_endpoint() -> Dict[str, Any]:
     """
     cached = cache.get()
     if not cached:
-        raise HTTPException(status_code=503, detail="Data not ready")
+        return _warming_up_response(
+            advances=0,
+            declines=0,
+            unchanged=0,
+            advance_decline_ratio=0.0,
+            adr=0.0,
+            pct_above_vwap=0.0,
+            pct_positive=0.0,
+            nifty50_breadth=0.0,
+            breadth_signal="WARMING_UP",
+            sector_breadth={},
+            sector_breadth_list=[],
+            total_stocks=0,
+        )
     try:
         return get_market_breadth(cached.get("sectors", []))
     except Exception as exc:
@@ -663,7 +690,7 @@ def sector_relative_strength_endpoint() -> Dict[str, Any]:
     """
     cached = cache.get()
     if not cached:
-        raise HTTPException(status_code=503, detail="Data not ready")
+        return _warming_up_response(sectors=[], last_updated="")
     try:
         data = get_relative_sector_strength(cached.get("sectors", []))
         return {
@@ -688,7 +715,7 @@ def trade_plan_bulk_endpoint(direction: str = "") -> Dict[str, Any]:
     """
     sym_data = get_scanner_symbols()
     if not sym_data:
-        raise HTTPException(status_code=503, detail="Data not ready")
+        return _warming_up_response(plans=[], count=0, long_count=0, short_count=0, last_updated="")
     try:
         plans = get_bulk_trade_plans(sym_data)
         if direction.upper() in ("LONG", "SHORT"):
@@ -708,10 +735,10 @@ def trade_plan_bulk_endpoint(direction: str = "") -> Dict[str, Any]:
 @app.get("/api/trade-plan/{symbol}", summary="Trade plan for a single stock", tags=["Trade Planner"])
 def trade_plan_single_endpoint(symbol: str) -> Dict[str, Any]:
     """Returns a trade plan for a single stock symbol."""
+    clean = symbol.upper().replace(".NS", "")
     sym_data = get_scanner_symbols()
     if not sym_data:
-        raise HTTPException(status_code=503, detail="Data not ready")
-    clean = symbol.upper().replace(".NS", "")
+        return _warming_up_response(symbol=clean, strategy="WARMING_UP")
     stock = sym_data.get(clean)
     if not stock:
         raise HTTPException(status_code=404, detail=f"Symbol {clean} not found in cache")
@@ -784,7 +811,17 @@ def fo_radar_endpoint(
     if not stocks:
         cached = cache.get()
         if not cached:
-            raise HTTPException(status_code=503, detail="F&O Radar cache not ready yet — initial load in progress.")
+            return _warming_up_response(
+                message="F&O Radar cache is warming up",
+                stocks=[],
+                total=0,
+                buy_count=0,
+                sell_count=0,
+                avoid_count=0,
+                last_updated=cache.last_updated_str(),
+                cache_age_seconds=None,
+                note="OI cache not yet populated — refreshes automatically each cycle.",
+            )
         # Cache exists but radar hasn't run yet — trigger a quick price-action-only snapshot
         try:
             from stocks import FO_STOCKS
@@ -844,7 +881,7 @@ async def fo_radar_refresh_endpoint() -> Dict[str, Any]:
     """
     cached = cache.get()
     if not cached:
-        raise HTTPException(status_code=503, detail="Main cache not ready.")
+        return _warming_up_response(status="warming_up", symbols=0)
     from stocks import FO_STOCKS
     fo_clean = [s.replace(".NS", "") for s in FO_STOCKS]
     # Use scanner_stocks for price data (not heatmap sectors)

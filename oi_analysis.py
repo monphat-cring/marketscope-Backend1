@@ -12,9 +12,9 @@ _IST = pytz.timezone("Asia/Kolkata")
 
 logger = logging.getLogger("oi_analysis")
 
-_WORKERS = 1          # NSE OC endpoint must be hit sequentially — parallel=instant 403
+_WORKERS = 3          # Limited concurrency keeps OI refresh fast without fully flooding NSE.
 _BUDGET_SECS = 120.0  # Sequential + delays: ~3s/symbol × 30 = 90s; give 120s budget
-_REQUEST_DELAY = 1.2  # seconds between requests (NSE OC allows ~1 req/s sustained)
+_REQUEST_DELAY = 0.4  # Limited concurrency + smaller delay reduces bulk OI latency.
 _OC_EQUITIES_URL = "https://www.nseindia.com/api/option-chain-equities"
 _OC_INDICES_URL  = "https://www.nseindia.com/api/option-chain-indices"
 
