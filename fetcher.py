@@ -10,10 +10,10 @@ import pandas as pd
 import pytz
 import yfinance as yf
 
-from angel_client import get_bulk_ltp
+from angel_client import get_bulk_ltp, get_bulk_full_quotes
 from stocks import ALL_SYMBOLS, SECTORS, FO_STOCKS, SCANNER_STOCKS
 from rfactor import calculate_rfactor_for_all
-from nse_fetcher import fetch_all_nse_data, fetch_all_nse_full_quotes, fetch_nse_index_quotes
+from nse_fetcher import fetch_nse_index_quotes
 from intraday_boost import calculate_intraday_boost
 
 logger = logging.getLogger(__name__)
@@ -259,24 +259,25 @@ def fetch_all_sectors() -> Dict[str, Any]:
         except Exception:
             return None
 
-    # STEP 1 — NSE real-time full quotes (replaces yfinance 5-min intraday).
+    # STEP 1 — SmartAPI FULL quotes (replaces NSE website scraping).
     # Returns per symbol: ltp, change_pct, prev_close, vwap, day_high, day_low,
-    #                     total_traded_volume (lakhs), delivery_pct, bid_ask_ratio
-    logger.info(f"Fetching NSE real-time full quotes for {len(clean_symbols)} symbols...")
+    #                     total_traded_volume (lakhs), bid_ask_ratio, bid_qty, ask_qty
+    logger.info(f"Fetching SmartAPI FULL quotes for {len(clean_symbols)} symbols...")
     nse_full: Dict[str, Any] = {}
     try:
-        nse_full = fetch_all_nse_full_quotes(clean_symbols)
-        logger.info(f"NSE quotes received for {len(nse_full)}/{len(clean_symbols)} symbols.")
+        nse_full = get_bulk_full_quotes(clean_symbols)
+        logger.info(f"SmartAPI quotes received for {len(nse_full)}/{len(clean_symbols)} symbols.")
     except Exception as e:
-        logger.warning(f"NSE full quote fetch failed: {e}")
+        logger.warning(f"SmartAPI full quote fetch failed: {e}")
 
-    logger.info(f"Fetching Angel SmartAPI LTP for {len(clean_symbols)} symbols...")
     angel_ltp: Dict[str, float] = {}
-    try:
-        angel_ltp = get_bulk_ltp(clean_symbols)
-        logger.info(f"Angel LTP received for {len(angel_ltp)}/{len(clean_symbols)} symbols.")
-    except Exception as e:
-        logger.warning(f"Angel LTP fetch failed: {e}")
+    if not nse_full:
+        logger.info(f"Falling back to Angel LTP for {len(clean_symbols)} symbols...")
+        try:
+            angel_ltp = get_bulk_ltp(clean_symbols)
+            logger.info(f"Angel LTP received for {len(angel_ltp)}/{len(clean_symbols)} symbols.")
+        except Exception as e:
+            logger.warning(f"Angel LTP fetch failed: {e}")
 
     logger.info("Fetching official NSE sector indices...")
     official_indices: Dict[str, Dict[str, Any]] = {}

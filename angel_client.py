@@ -357,6 +357,41 @@ def get_bulk_ltp(symbols: Iterable[str]) -> Dict[str, float]:
     }
 
 
+def get_bulk_full_quotes(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    """Fetch FULL market data via SmartAPI for all symbols and normalise into
+    the same shape that fetcher.py previously expected from NSE scraping.
+
+    Returns dict keyed by clean symbol with:
+        ltp, change_pct, prev_close, day_open, day_high, day_low, vwap,
+        total_traded_volume (in lakhs), bid_qty, ask_qty, bid_ask_ratio
+    """
+    raw = get_market_quotes(symbols, mode="FULL")
+    result: Dict[str, Dict[str, Any]] = {}
+    for symbol, row in raw.items():
+        ltp = float(row.get("ltp", 0) or 0)
+        if ltp <= 0:
+            continue
+        prev_close = float(row.get("close", 0) or 0)
+        tot_buy = int(row.get("totBuyQuan", 0) or 0)
+        tot_sell = int(row.get("totSellQuan", 0) or 0)
+        trade_vol = float(row.get("tradeVolume", 0) or 0)
+        result[symbol] = {
+            "ltp":                round(ltp, 2),
+            "change_pct":         round(float(row.get("percentChange", 0) or 0), 2),
+            "prev_close":         round(prev_close, 2),
+            "day_open":           round(float(row.get("open", 0) or 0), 2),
+            "day_high":           round(float(row.get("high", 0) or 0), 2),
+            "day_low":            round(float(row.get("low", 0) or 0), 2),
+            "vwap":               round(float(row.get("avgPrice", 0) or 0), 2),
+            "total_traded_volume": round(trade_vol / 100_000, 2),  # shares → lakhs
+            "bid_qty":            tot_buy,
+            "ask_qty":            tot_sell,
+            "bid_ask_ratio":      round(tot_buy / tot_sell, 2) if tot_sell > 0 else 1.0,
+            "delivery_pct":       0.0,  # not available from SmartAPI
+        }
+    return result
+
+
 def get_intraday_candles(symbol_token: str, interval: str, from_date: str, to_date: str) -> List[List[Any]]:
     cache_key = (str(symbol_token), interval, from_date, to_date)
     with _candles_lock:
