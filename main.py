@@ -594,6 +594,7 @@ def morning_watchlist_endpoint(date: str = None) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/oi/bulk", summary="Bulk OI analysis for multiple symbols", tags=["OI Analysis"])
+@app.get("/oi/bulk", include_in_schema=False)
 def oi_bulk_endpoint(symbols: str = "") -> Dict[str, Any]:
     """
     Returns OI analysis for multiple F&O symbols.
@@ -631,6 +632,7 @@ def oi_bulk_endpoint(symbols: str = "") -> Dict[str, Any]:
 
 
 @app.get("/api/oi/{symbol}", summary="OI analysis for a single symbol", tags=["OI Analysis"])
+@app.get("/oi/{symbol}", include_in_schema=False)
 def oi_single_endpoint(symbol: str) -> Dict[str, Any]:
     """Returns OI analysis for a single F&O stock or index (NIFTY/BANKNIFTY)."""
     try:
@@ -650,6 +652,7 @@ def oi_single_endpoint(symbol: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/breadth", summary="Market breadth — advances/declines/VWAP stats", tags=["Market Data"])
+@app.get("/breadth", include_in_schema=False)
 def breadth_endpoint() -> Dict[str, Any]:
     """
     Returns real-time market breadth computed from cached sector data.
@@ -683,6 +686,7 @@ def breadth_endpoint() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/sector-relative-strength", summary="Sector strength relative to Nifty50", tags=["Market Data"])
+@app.get("/sector-relative-strength", include_in_schema=False)
 def sector_relative_strength_endpoint() -> Dict[str, Any]:
     """
     Returns each sector's change_pct and its performance relative to Nifty50.
@@ -707,6 +711,7 @@ def sector_relative_strength_endpoint() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/trade-plan/bulk", summary="Trade plans for all F&O stocks", tags=["Trade Planner"])
+@app.get("/trade-plan/bulk", include_in_schema=False)
 def trade_plan_bulk_endpoint(direction: str = "") -> Dict[str, Any]:
     """
     Returns actionable trade plans (LONG and SHORT) for all F&O stocks.
@@ -733,6 +738,7 @@ def trade_plan_bulk_endpoint(direction: str = "") -> Dict[str, Any]:
 
 
 @app.get("/api/trade-plan/{symbol}", summary="Trade plan for a single stock", tags=["Trade Planner"])
+@app.get("/trade-plan/{symbol}", include_in_schema=False)
 def trade_plan_single_endpoint(symbol: str) -> Dict[str, Any]:
     """Returns a trade plan for a single stock symbol."""
     clean = symbol.upper().replace(".NS", "")
@@ -757,6 +763,7 @@ def trade_plan_single_endpoint(symbol: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/52w-breakouts", summary="52-week high institutional breakout scanner", tags=["Market Data"])
+@app.get("/52w-breakouts", include_in_schema=False)
 def breakouts_52w_endpoint() -> Dict[str, Any]:
     """
     Returns stocks within 0.5% of their 52-week high with 2x+ volume surge.
@@ -792,6 +799,7 @@ def health() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/fo-radar", summary="F&O Trade Radar — BUY/SELL/AVOID for every F&O stock", tags=["OI Analysis"])
+@app.get("/fo-radar", include_in_schema=False)
 def fo_radar_endpoint(
     signal: str = "ALL",
     min_confidence: int = 1,
