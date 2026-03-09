@@ -255,6 +255,7 @@ async def get_rfactor(
     limit: int = 20,
     fo_only: bool = False,
     min_score: float = 0,
+    sort_by: str = "rfactor",
 ) -> Dict[str, Any]:
     """
     Returns stocks ranked by R-Factor score (composite of volume, price action,
@@ -264,6 +265,7 @@ async def get_rfactor(
     - limit: number of stocks to return (default 20)
     - fo_only: filter to F&O eligible stocks only
     - min_score: minimum R-Factor score threshold
+    - sort_by: rfactor | opportunity | trend
     """
     cached = cache.get()
     if not cached:
@@ -278,8 +280,13 @@ async def get_rfactor(
     if min_score > 0:
         all_stocks = [s for s in all_stocks if s.get("rfactor", 0) >= min_score]
 
-    # Sort by rfactor descending
-    all_stocks.sort(key=lambda x: x.get("rfactor", 0), reverse=True)
+    sort_key = str(sort_by or "rfactor").strip().lower()
+    if sort_key == "opportunity":
+        all_stocks.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)
+    elif sort_key == "trend":
+        all_stocks.sort(key=lambda x: x.get("rfactor_trend_15m", 0), reverse=True)
+    else:
+        all_stocks.sort(key=lambda x: x.get("rfactor", 0), reverse=True)
 
     # Limit
     all_stocks = all_stocks[:limit]
@@ -288,6 +295,7 @@ async def get_rfactor(
         "stocks": all_stocks,
         "last_updated": cached.get("last_updated", ""),
         "total": len(all_stocks),
+        "sort_by": sort_key,
     }
 
 
