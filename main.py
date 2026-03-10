@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from cache import InMemoryCache
+from backend.momentum_pulse import get_momentum_pulse
 from fetcher import fetch_all_sectors
 from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
@@ -216,7 +217,7 @@ def root() -> Dict[str, Any]:
     """Welcome endpoint — returns app info and available endpoints."""
     return {
         "app": "MarketScope API",
-        "endpoints": ["/heatmap", "/health"],
+        "endpoints": ["/heatmap", "/rfactor", "/momentum-pulse", "/health"],
         "description": "Indian Stock Market Heatmap Backend",
     }
 
@@ -297,6 +298,40 @@ async def get_rfactor(
         "total": len(all_stocks),
         "sort_by": sort_key,
     }
+
+
+@app.get("/momentum-pulse", summary="Live intraday abnormal activity discovery engine", tags=["Market Data"])
+async def momentum_pulse_endpoint(
+    limit: int = 40,
+    direction: str = "ALL",
+    include_veryweak: bool = False,
+) -> Dict[str, Any]:
+    """
+    Returns live intraday movers ranked by abnormal same-time volume/range activity,
+    relative strength vs Nifty, directional consistency, light VWAP alignment,
+    and score trend improvement.
+
+    Query params:
+    - limit: number of stocks to return (default 40)
+    - direction: ALL | LONG | SHORT
+    - include_veryweak: include veryweak tier names in response
+    """
+    cached = cache.get()
+    if not cached:
+        return _warming_up_response(stocks=[], total=0, last_updated="", direction="ALL")
+
+    try:
+        result = get_momentum_pulse(
+            scanner_stocks=list(cached.get("scanner_stocks", [])),
+            last_updated=str(cached.get("last_updated", "") or ""),
+            direction=direction,
+            include_veryweak=include_veryweak,
+            limit=limit,
+        )
+        return result
+    except Exception as exc:
+        logger.error("Momentum Pulse endpoint error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Momentum Pulse computation failed") from exc
 
 
 @app.get("/scanner", summary="Scan stocks by change, volume, direction and sector", tags=["Market Data"])
