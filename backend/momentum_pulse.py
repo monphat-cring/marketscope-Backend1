@@ -26,6 +26,9 @@ _pulse_cache: Dict[str, Any] = {
     "computed_at": 0.0,
     "benchmark_change_pct": 0.0,
     "results": [],
+    "is_loading": False,
+    "last_attempt": 0.0,
+    "error": "",
 }
 _score_state: Dict[str, Dict[str, Any]] = {}
 _lock = threading.Lock()
@@ -701,13 +704,13 @@ def _compute_momentum_pulse(scanner_stocks: List[Dict[str, Any]]) -> Tuple[List[
 
     raw = yf.download(
         tickers=" ".join(symbols_ns + ["^NSEI"]),
-        period="45d",
+        period="35d",
         interval="5m",
         auto_adjust=False,
         group_by="ticker",
         progress=False,
         threads=True,
-        timeout=45,
+        timeout=25,
     )
     benchmark_change_pct = _nifty_change_from_sources(raw)
 
@@ -737,6 +740,24 @@ def _compute_momentum_pulse(scanner_stocks: List[Dict[str, Any]]) -> Tuple[List[
     for index, item in enumerate(results, start=1):
         item["rank"] = index
     return results, benchmark_change_pct
+
+
+def _refresh_momentum_pulse_cache(source_key: str, scanner_stocks: List[Dict[str, Any]]) -> None:
+    try:
+        results, benchmark_change_pct = _compute_momentum_pulse(scanner_stocks)
+        with _lock:
+            _pulse_cache["source_key"] = source_key
+            _pulse_cache["computed_at"] = time.time()
+            _pulse_cache["benchmark_change_pct"] = benchmark_change_pct
+            _pulse_cache["results"] = results
+            _pulse_cache["error"] = ""
+    except Exception as exc:
+        logger.error("Momentum Pulse refresh failed: %s", exc, exc_info=True)
+        with _lock:
+            _pulse_cache["error"] = str(exc)
+    finally:
+        with _lock:
+            _pulse_cache["is_loading"] = False
 
 
 def _filter_results(
@@ -784,6 +805,9 @@ def get_momentum_pulse(
         cached_results = list(_pulse_cache.get("results") or [])
         cached_benchmark = _safe_float(_pulse_cache.get("benchmark_change_pct"))
         cached_at = _safe_float(_pulse_cache.get("computed_at"))
+        is_loading = bool(_pulse_cache.get("is_loading"))
+        last_attempt = _safe_float(_pulse_cache.get("last_attempt"))
+        cache_error = str(_pulse_cache.get("error") or "")
 
     if cached_source_key == source_key and cached_results and (time.time() - cached_at) <= REFRESH_COOLDOWN_SECONDS:
         stocks = _filter_results(cached_results, normalized_direction, include_veryweak, limit)
@@ -794,21 +818,35 @@ def get_momentum_pulse(
             "direction": normalized_direction,
             "include_veryweak": include_veryweak,
             "benchmark_change_pct": round(cached_benchmark, 2),
+            "is_loading": False,
+            "status": "ready",
         }
 
-    results, benchmark_change_pct = _compute_momentum_pulse(scanner_stocks)
-    with _lock:
-        _pulse_cache["source_key"] = source_key
-        _pulse_cache["computed_at"] = time.time()
-        _pulse_cache["benchmark_change_pct"] = benchmark_change_pct
-        _pulse_cache["results"] = results
+    should_refresh = (source_key != cached_source_key) or not cached_results
+    cooldown_elapsed = (time.time() - last_attempt) >= 15.0
+    if should_refresh and not is_loading and cooldown_elapsed:
+        with _lock:
+            _pulse_cache["is_loading"] = True
+            _pulse_cache["last_attempt"] = time.time()
+            _pulse_cache["error"] = ""
+        thread = threading.Thread(
+            target=_refresh_momentum_pulse_cache,
+            args=(source_key, list(scanner_stocks)),
+            daemon=True,
+            name="momentum-pulse-refresh",
+        )
+        thread.start()
 
-    stocks = _filter_results(results, normalized_direction, include_veryweak, limit)
+    stocks = _filter_results(cached_results, normalized_direction, include_veryweak, limit)
+    status = "warming_up" if not stocks else "stale_refreshing" if should_refresh else "ready"
     return {
         "stocks": stocks,
         "total": len(stocks),
         "last_updated": last_updated,
         "direction": normalized_direction,
         "include_veryweak": include_veryweak,
-        "benchmark_change_pct": round(benchmark_change_pct, 2),
+        "benchmark_change_pct": round(cached_benchmark, 2),
+        "is_loading": bool(_pulse_cache.get("is_loading")),
+        "status": status,
+        "message": cache_error or ("Momentum Pulse cache is warming up" if not stocks else "Momentum Pulse refresh is running in background" if should_refresh else ""),
     }
