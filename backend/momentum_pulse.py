@@ -27,6 +27,7 @@ _pulse_cache: Dict[str, Any] = {
     "last_updated": "",
     "benchmark_change_pct": 0.0,
     "results": [],
+    "has_completed": False,
     "is_loading": False,
     "last_attempt": 0.0,
     "error": "",
@@ -63,10 +64,38 @@ def _snapshot_cache() -> Dict[str, Any]:
             "last_updated": str(_pulse_cache.get("last_updated") or ""),
             "benchmark_change_pct": _safe_float(_pulse_cache.get("benchmark_change_pct")),
             "results": list(_pulse_cache.get("results") or []),
+            "has_completed": bool(_pulse_cache.get("has_completed")),
             "is_loading": bool(_pulse_cache.get("is_loading")),
             "last_attempt": _safe_float(_pulse_cache.get("last_attempt")),
             "error": str(_pulse_cache.get("error") or ""),
         }
+
+
+def _chunked(items: Sequence[Any], size: int) -> List[List[Any]]:
+    return [list(items[index:index + size]) for index in range(0, len(items), size)]
+
+
+def _download_intraday_batch(symbols_ns: Sequence[str]) -> Optional[pd.DataFrame]:
+    if not symbols_ns:
+        return None
+    try:
+        raw = yf.download(
+            tickers=" ".join(symbols_ns),
+            period="35d",
+            interval="5m",
+            auto_adjust=False,
+            group_by="ticker",
+            progress=False,
+            threads=False,
+            timeout=20,
+        )
+        if raw is None or raw.empty:
+            logger.warning("Momentum Pulse batch download returned empty for %d symbols.", len(symbols_ns))
+            return None
+        return raw
+    except Exception as exc:
+        logger.warning("Momentum Pulse batch download failed for %d symbols: %s", len(symbols_ns), exc)
+        return None
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -726,31 +755,40 @@ def _compute_momentum_pulse(scanner_stocks: List[Dict[str, Any]]) -> Tuple[List[
     if not symbols_ns:
         return [], 0.0
 
-    raw = yf.download(
-        tickers=" ".join(symbols_ns + ["^NSEI"]),
-        period="35d",
-        interval="5m",
-        auto_adjust=False,
-        group_by="ticker",
-        progress=False,
-        threads=True,
-        timeout=25,
-    )
-    benchmark_change_pct = _nifty_change_from_sources(raw)
+    benchmark_change_pct = _nifty_change_from_sources(None)
 
     results: List[Dict[str, Any]] = []
-    for stock in scanner_stocks:
-        symbol = str(stock.get("symbol") or "").strip().upper()
-        if not symbol:
+    stocks_by_symbol = {
+        str(stock.get("symbol") or "").strip().upper(): stock
+        for stock in scanner_stocks
+        if str(stock.get("symbol") or "").strip().upper()
+    }
+    successful_batches = 0
+    for batch_symbols in _chunked(symbols_ns, 30):
+        raw = _download_intraday_batch(batch_symbols)
+        if raw is None or raw.empty:
             continue
-        df_5m = _get_sym_df(raw, f"{symbol}.NS")
-        try:
-            row = _evaluate_symbol(stock, df_5m, benchmark_change_pct)
-        except Exception as exc:
-            logger.warning("Momentum Pulse failed for %s: %s", symbol, exc)
-            row = None
-        if row:
-            results.append(row)
+        successful_batches += 1
+        for symbol_ns in batch_symbols:
+            clean_symbol = symbol_ns.replace(".NS", "")
+            stock = stocks_by_symbol.get(clean_symbol)
+            if not stock:
+                continue
+            df_5m = _get_sym_df(raw, symbol_ns)
+            try:
+                row = _evaluate_symbol(stock, df_5m, benchmark_change_pct)
+            except Exception as exc:
+                logger.warning("Momentum Pulse failed for %s: %s", clean_symbol, exc)
+                row = None
+            if row:
+                results.append(row)
+
+    logger.info(
+        "Momentum Pulse computed %d names from %d successful batches out of %d.",
+        len(results),
+        successful_batches,
+        len(_chunked(symbols_ns, 30)),
+    )
 
     results.sort(
         key=lambda item: (
@@ -775,10 +813,12 @@ def _refresh_momentum_pulse_cache(source_key: str, scanner_stocks: List[Dict[str
             _pulse_cache["last_updated"] = _now_ist_str()
             _pulse_cache["benchmark_change_pct"] = benchmark_change_pct
             _pulse_cache["results"] = results
+            _pulse_cache["has_completed"] = True
             _pulse_cache["error"] = ""
     except Exception as exc:
         logger.error("Momentum Pulse refresh failed: %s", exc, exc_info=True)
         with _lock:
+            _pulse_cache["has_completed"] = True
             _pulse_cache["error"] = str(exc)
     finally:
         with _lock:
@@ -829,6 +869,7 @@ def get_momentum_pulse_cache_status() -> Dict[str, Any]:
         "is_loading": snapshot["is_loading"],
         "error": snapshot["error"],
         "total_cached": len(snapshot["results"]),
+        "has_completed": snapshot["has_completed"],
     }
 
 
@@ -876,6 +917,7 @@ def get_momentum_pulse(
     cached_benchmark = _safe_float(snapshot["benchmark_change_pct"])
     cached_at = _safe_float(snapshot["computed_at"])
     pulse_last_updated = str(snapshot["last_updated"] or "")
+    has_completed = bool(snapshot["has_completed"])
     is_loading = bool(snapshot["is_loading"])
     last_attempt = _safe_float(snapshot["last_attempt"])
     cache_error = str(snapshot["error"] or "")
@@ -901,7 +943,7 @@ def get_momentum_pulse(
 
     stocks = _filter_results(cached_results, normalized_direction, include_veryweak, limit)
     has_any_cached_results = bool(cached_results)
-    status = "warming_up" if not has_any_cached_results else "stale_refreshing" if should_refresh else "ready"
+    status = "warming_up" if not has_completed else "stale_refreshing" if has_any_cached_results and should_refresh else "ready"
     return {
         "stocks": stocks,
         "total": len(stocks),
@@ -912,5 +954,5 @@ def get_momentum_pulse(
         "benchmark_change_pct": round(cached_benchmark, 2),
         "is_loading": bool(_snapshot_cache().get("is_loading")),
         "status": status,
-        "message": cache_error or ("Momentum Pulse cache is warming up" if not has_any_cached_results else "Momentum Pulse refresh is running in background" if should_refresh else ""),
+        "message": cache_error or ("Momentum Pulse cache is warming up" if not has_completed else "Momentum Pulse refresh is running in background" if has_any_cached_results and should_refresh else "No discovery names matched the current filters yet" if not has_any_cached_results else ""),
     }
