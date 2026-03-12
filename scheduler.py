@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
+FETCH_TIMEOUT_SECONDS = int(os.getenv("FETCH_TIMEOUT_SECONDS", 240))
 
 
 def is_market_hours() -> bool:
@@ -58,10 +59,13 @@ async def scheduled_fetch(cache_obj: "InMemoryCache") -> None:
 
     try:
         logger.info("Scheduled fetch started (background thread)...")
-        loop = asyncio.get_event_loop()
-        # shield() ensures the executor thread runs to completion even if this
-        # coroutine is cancelled by APScheduler before the fetch finishes.
-        data = await asyncio.shield(loop.run_in_executor(_fetch_executor, fetch_all_sectors))
+        loop = asyncio.get_running_loop()
+        # shield() keeps the worker thread alive, while wait_for ensures one stuck
+        # cycle does not block every subsequent 5-minute scheduler run.
+        data = await asyncio.wait_for(
+            asyncio.shield(loop.run_in_executor(_fetch_executor, fetch_all_sectors)),
+            timeout=FETCH_TIMEOUT_SECONDS,
+        )
         cache_obj.set(data)
         schedule_momentum_pulse_refresh(
             scanner_stocks=list(data.get("scanner_stocks", [])),
@@ -83,6 +87,11 @@ async def scheduled_fetch(cache_obj: "InMemoryCache") -> None:
             logger.info("F&O Radar background refresh started (%d symbols).", len(fo_clean))
         except Exception as radar_exc:
             logger.warning("F&O Radar refresh could not start: %s", radar_exc)
+    except asyncio.TimeoutError:
+        logger.error(
+            "Scheduled fetch exceeded %ss timeout; skipping this cycle so the next refresh can still run.",
+            FETCH_TIMEOUT_SECONDS,
+        )
     except asyncio.CancelledError:
         # Coroutine was cancelled (next interval fired or server shutting down).
         # shield() keeps the background thread alive; we just skip the cache update.

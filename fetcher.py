@@ -15,7 +15,6 @@ import yfinance as yf
 
 from angel_client import get_bulk_ltp, get_bulk_full_quotes
 from stocks import ALL_SYMBOLS, SECTORS, FO_STOCKS, SCANNER_STOCKS
-from rfactor import calculate_rfactor_for_all
 from nse_fetcher import fetch_nse_index_quotes
 from intraday_boost import calculate_intraday_boost
 
@@ -51,6 +50,39 @@ def _safe_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _apply_neutral_rfactor_fields(sym_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Populate neutral R-Factor fields so downstream features keep working when R-Factor is disabled."""
+    for stock in sym_data.values():
+        stock.setdefault("rfactor", 0.0)
+        stock.setdefault("tier", "very_weak")
+        stock.setdefault("rsi", 50.0)
+        stock.setdefault("mfi", 50.0)
+        stock.setdefault("relative_strength", 0.0)
+        stock.setdefault("setup_stage", "NEUTRAL")
+        stock.setdefault("alert_stage", "NEUTRAL")
+        stock.setdefault("opportunity_score", 0.0)
+        stock.setdefault("rfactor_trend_15m", 0.0)
+        stock.setdefault("rfactor_trend_points", [0.0])
+        stock.setdefault("rfactor_trend_acceleration", 0.0)
+        stock.setdefault("pre_score", 0.0)
+        stock.setdefault("trigger_score", 0.0)
+        stock.setdefault("inferred_direction", "NEUTRAL")
+        stock.setdefault("direction_conf", 0.0)
+        stock.setdefault("compression", 0.0)
+        stock.setdefault("obv_slope_score", 0.0)
+        stock.setdefault("vol_accel", 1.0)
+        stock.setdefault("rsi_slope_5m", 0.0)
+        stock.setdefault("nearest_level", "")
+        stock.setdefault("proximity_score", 0.0)
+        stock.setdefault("dist_pct", 999.0)
+        stock.setdefault("breakout_levels", {})
+        stock.setdefault("breakout_quality", 0.0)
+        stock.setdefault("vwap_acceptance", 0.0)
+        stock.setdefault("is_chase", False)
+        stock.setdefault("chase_reason", "")
+    return sym_data
 
 
 def _compute_change_pct(ltp: float, prev_close: float, fallback_change_pct: float = 0.0) -> float:
@@ -430,7 +462,8 @@ def fetch_all_sectors() -> Dict[str, Any]:
     if not nse_data:
         logger.warning("Live depth data empty — rfactor will use neutral delivery/bid values.")
 
-    sym_data = calculate_rfactor_for_all(sym_data, None, data_15min, nse_data)
+    logger.info("R-Factor computation disabled — using neutral placeholder fields to keep refresh cycle light.")
+    sym_data = _apply_neutral_rfactor_fields(sym_data)
     sym_data = calculate_intraday_boost(sym_data, None, daily_data)
 
     # STEP 6 — VWAP standard deviation bands (Feature 4)

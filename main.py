@@ -227,7 +227,7 @@ def root() -> Dict[str, Any]:
     """Welcome endpoint — returns app info and available endpoints."""
     return {
         "app": "MarketScope API",
-        "endpoints": ["/heatmap", "/rfactor", "/momentum-pulse", "/health"],
+        "endpoints": ["/heatmap", "/momentum-pulse", "/health"],
         "description": "Indian Stock Market Heatmap Backend",
     }
 
@@ -269,35 +269,13 @@ async def get_rfactor(
     - min_score: minimum R-Factor score threshold
     - sort_by: rfactor | opportunity | trend
     """
-    cached = cache.get()
-    if not cached or cache.is_stale(CACHE_DURATION_SECONDS):
-        return _warming_up_response(stocks=[], last_updated="", total=0)
-
-    # Use the scanner_stocks universe (not heatmap sectors)
-    all_stocks = list(cached.get("scanner_stocks", []))
-
-    # Apply filters
-    if fo_only:
-        all_stocks = [s for s in all_stocks if s.get("fo")]
-    if min_score > 0:
-        all_stocks = [s for s in all_stocks if s.get("rfactor", 0) >= min_score]
-
-    sort_key = str(sort_by or "rfactor").strip().lower()
-    if sort_key == "opportunity":
-        all_stocks.sort(key=lambda x: x.get("opportunity_score", 0), reverse=True)
-    elif sort_key == "trend":
-        all_stocks.sort(key=lambda x: x.get("rfactor_trend_15m", 0), reverse=True)
-    else:
-        all_stocks.sort(key=lambda x: x.get("rfactor", 0), reverse=True)
-
-    # Limit
-    all_stocks = all_stocks[:limit]
-
     return {
-        "stocks": all_stocks,
-        "last_updated": cached.get("last_updated", ""),
-        "total": len(all_stocks),
-        "sort_by": sort_key,
+        "stocks": [],
+        "last_updated": cache.get().get("last_updated", "") if cache.get() else "",
+        "total": 0,
+        "sort_by": str(sort_by or "rfactor").strip().lower(),
+        "status": "disabled",
+        "message": "R-Factor is disabled to reduce backend refresh load.",
     }
 
 
